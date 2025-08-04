@@ -39,7 +39,7 @@ class CodeExecutionResult:
 
 
 # Published package name
-PKG_NAME = "jsr:@langchain/pyodide-sandbox@0.0.4"
+PKG_NAME = "jsr:@aawz/pyodide-sandbox@1.0.0"
 # PKG_NAME = "../pyodide-sandbox-js/main.ts"
 
 
