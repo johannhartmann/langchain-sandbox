@@ -27,6 +27,30 @@ import pyodide_js  # noqa
 
 sys.setrecursionlimit(400)
 
+# Auto-configure matplotlib for headless environment
+def _configure_matplotlib_backend():
+    """Automatically configure matplotlib to use Agg backend for headless environment."""
+    try:
+        import matplotlib
+        # Only set if not already configured
+        current_backend = matplotlib.get_backend()
+        if current_backend != 'Agg' and 'inline' not in current_backend.lower():
+            matplotlib.use('Agg')
+            import sys
+            print("Matplotlib backend automatically set to 'Agg' for headless environment", file=sys.stderr)
+    except ImportError:
+        pass  # matplotlib not installed yet
+
+# Monkey-patch matplotlib to auto-configure when imported
+import sys
+_matplotlib_configured = False
+
+def configure_matplotlib_on_import():
+    global _matplotlib_configured
+    if not _matplotlib_configured and 'matplotlib' in sys.modules:
+        _configure_matplotlib_backend()
+        _matplotlib_configured = True
+
 class InstallEntry(TypedDict):
     module: str
     package: str
@@ -178,9 +202,16 @@ async def install_imports(
         for entry in to_install:
             try:
                 await micropip.install(entry["package"])
+                # Auto-configure matplotlib if it was just installed
+                if entry["package"] == "matplotlib" or entry["module"] == "matplotlib":
+                    configure_matplotlib_on_import()
             except Exception as e:
                 message_callback("failed", entry["package"])
                 break # Fail fast
+    
+    # Always check if matplotlib needs configuration after imports
+    configure_matplotlib_on_import()
+    
     return to_install
 
 def load_session_bytes(session_bytes: bytes) -> list[str]:
@@ -581,6 +612,30 @@ async function runPython(
 
     // Restore the original console.log function
     console.log = originalLog;
+    
+    // Set up matplotlib auto-configuration before running user code
+    const matplotlibHook = `
+# Set up auto-configuration for matplotlib in headless environment
+import sys
+import os
+
+# Set MPLBACKEND environment variable to use Agg by default
+os.environ['MPLBACKEND'] = 'Agg'
+
+# Also try to configure if matplotlib is already imported (shouldn't be yet)
+if 'matplotlib' in sys.modules:
+    import matplotlib
+    try:
+        matplotlib.use('Agg')
+    except:
+        pass
+`;
+    
+    try {
+      await (pyodide as { runPythonAsync: (code: string) => Promise<unknown> }).runPythonAsync(matplotlibHook);
+    } catch {
+      // Ignore errors
+    }
     
     // Run the Python code
     const rawValue = await (pyodide as { runPythonAsync: (code: string) => Promise<unknown> }).runPythonAsync(pythonCode);
