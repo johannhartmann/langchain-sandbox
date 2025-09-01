@@ -66,6 +66,19 @@ check_untyped_defs = true
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["langchain_sandbox"]
+
+[tool.hatch.build.targets.wheel.sources]
+"langchain_sandbox" = "langchain_sandbox"
+
+[tool.hatch.build]
+include = [
+    "langchain_sandbox/*.py",
+    "langchain_sandbox/*.ts",
+    "langchain_sandbox/*.js",
+]
+
 [tool.ruff.lint.extend-per-file-ignores]
 "tests/**/*.py" = [
     # at least this three should be fine in tests:

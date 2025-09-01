@@ -6,6 +6,7 @@ import json
 import logging
 import subprocess
 import time
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from langchain_core.callbacks import (
@@ -38,9 +39,17 @@ class CodeExecutionResult:
     filesystem_operations: list[dict] | None = None
 
 
-# Published package name
-PKG_NAME = "jsr:@langchain/pyodide-sandbox@0.0.4"
-# PKG_NAME = "../pyodide-sandbox-js/main.ts"
+# Package configuration
+# Use the source TypeScript file directly from the original location
+# This ensures we have access to the proper Deno configuration and dependencies
+SANDBOX_JS_PATH = Path(__file__).parent.parent.parent / "pyodide-sandbox-js" / "main.ts"
+
+# Ensure the path exists and use absolute path
+if SANDBOX_JS_PATH.exists():
+    PKG_NAME = str(SANDBOX_JS_PATH.absolute())
+else:
+    # Fallback to JSR package if local source not found
+    PKG_NAME = "jsr:@langchain/pyodide-sandbox@0.0.4"
 
 
 def build_permission_flag(
@@ -176,7 +185,7 @@ class BasePyodideSandbox:
         if not skip_deno_check:
             # Check if Deno is installed
             try:
-                subprocess.run(["deno", "--version"], check=True, capture_output=True)  # noqa: S607, S603
+                subprocess.run(["deno", "--version"], check=True, capture_output=True)  # noqa: S607
             except subprocess.CalledProcessError as e:
                 msg = "Deno is installed, but running it failed."
                 raise RuntimeError(msg) from e
@@ -186,12 +195,43 @@ class BasePyodideSandbox:
 
         # Define permission configurations:
         # each tuple contains (flag, setting, defaults)
+
+        # If we're using a local TypeScript file, we need to add its directory to read/write permissions
+        read_defaults = ["node_modules"]
+        write_defaults = ["node_modules"]
+
+        if SANDBOX_JS_PATH.exists() and SANDBOX_JS_PATH.is_file():
+            # Add the parent directory of the TypeScript file to permissions
+            js_parent_dir = str(SANDBOX_JS_PATH.parent.absolute())
+            read_defaults.append(js_parent_dir)
+            write_defaults.append(js_parent_dir)
+
+            # If allow_read is a list, add the JS directory to it
+            if isinstance(allow_read, list):
+                allow_read = allow_read + [js_parent_dir]
+            elif allow_read is True:
+                # Keep it as True (allows all)
+                pass
+            elif allow_read is False or allow_read is None:
+                # Set it to allow the JS directory
+                allow_read = [js_parent_dir]
+
+            # Same for write permissions
+            if isinstance(allow_write, list):
+                allow_write = allow_write + [js_parent_dir]
+            elif allow_write is True:
+                # Keep it as True (allows all)
+                pass
+            elif allow_write is False or allow_write is None:
+                # Set it to allow the JS directory
+                allow_write = [js_parent_dir]
+
         perm_defs = [
             ("--allow-env", allow_env, None),
             # For file system permissions, if no permission is specified,
-            # force node_modules
-            ("--allow-read", allow_read, ["node_modules"]),
-            ("--allow-write", allow_write, ["node_modules"]),
+            # force node_modules and potentially the JS directory
+            ("--allow-read", allow_read, read_defaults),
+            ("--allow-write", allow_write, write_defaults),
             ("--allow-net", allow_net, None),
             ("--allow-run", allow_run, None),
             ("--allow-ffi", allow_ffi, None),
