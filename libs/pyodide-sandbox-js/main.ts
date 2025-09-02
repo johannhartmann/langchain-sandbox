@@ -614,19 +614,22 @@ async function runPython(
     console.log = originalLog;
     
     // Set up matplotlib auto-configuration before running user code
+    // For Pyodide < 0.28, we need to use the wasm_backend
     const matplotlibHook = `
-# Set up auto-configuration for matplotlib in headless environment
+# Set up auto-configuration for matplotlib in Pyodide environment
 import sys
 import os
 
-# Set MPLBACKEND environment variable to use Agg by default
-os.environ['MPLBACKEND'] = 'Agg'
+# For Pyodide < 0.28, use the wasm_backend (not Agg)
+# The wasm_backend is designed for headless operation in Pyodide
+# Setting this environment variable will make matplotlib use the correct backend
+os.environ['MPLBACKEND'] = 'module://matplotlib_pyodide.wasm_backend'
 
-# Also try to configure if matplotlib is already imported (shouldn't be yet)
+# Also configure if matplotlib is already imported (shouldn't be yet)
 if 'matplotlib' in sys.modules:
     import matplotlib
     try:
-        matplotlib.use('Agg')
+        matplotlib.use('module://matplotlib_pyodide.wasm_backend')
     except:
         pass
 `;
