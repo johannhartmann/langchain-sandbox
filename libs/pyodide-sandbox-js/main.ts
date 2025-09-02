@@ -27,6 +27,12 @@ import pyodide_js  # noqa
 
 sys.setrecursionlimit(400)
 
+# Set matplotlib backend BEFORE any imports to avoid auto-detection
+# This is crucial for Pyodide environments where matplotlib might
+# try to auto-detect and use wasm_backend which requires browser objects
+import os
+os.environ['MPLBACKEND'] = 'Agg'
+
 # Auto-configure matplotlib for headless environment
 def _configure_matplotlib_backend():
     """Automatically configure matplotlib to use Agg backend for headless environment."""
@@ -612,33 +618,6 @@ async function runPython(
 
     // Restore the original console.log function
     console.log = originalLog;
-    
-    // Set up matplotlib auto-configuration before running user code
-    // For Pyodide < 0.28, we need to use the wasm_backend
-    const matplotlibHook = `
-# Set up auto-configuration for matplotlib in Pyodide environment
-import sys
-import os
-
-# For Pyodide < 0.28, use the wasm_backend (not Agg)
-# The wasm_backend is designed for headless operation in Pyodide
-# Setting this environment variable will make matplotlib use the correct backend
-os.environ['MPLBACKEND'] = 'module://matplotlib_pyodide.wasm_backend'
-
-# Also configure if matplotlib is already imported (shouldn't be yet)
-if 'matplotlib' in sys.modules:
-    import matplotlib
-    try:
-        matplotlib.use('module://matplotlib_pyodide.wasm_backend')
-    except:
-        pass
-`;
-    
-    try {
-      await (pyodide as { runPythonAsync: (code: string) => Promise<unknown> }).runPythonAsync(matplotlibHook);
-    } catch {
-      // Ignore errors
-    }
     
     // Run the Python code
     const rawValue = await (pyodide as { runPythonAsync: (code: string) => Promise<unknown> }).runPythonAsync(pythonCode);
