@@ -37,6 +37,45 @@ class CodeExecutionResult:
     session_bytes: bytes | None = None
     filesystem_info: dict | None = None
     filesystem_operations: list[dict] | None = None
+    files: dict[str, bytes] | None = None
+
+    def get_file(self, path: str) -> bytes | None:
+        """Get content of a specific file by path.
+
+        Args:
+            path: File path to retrieve
+
+        Returns:
+            File content as bytes, or None if not found
+        """
+        if self.files:
+            return self.files.get(path)
+        return None
+
+    def save_files(self, output_dir: str) -> None:
+        """Save all retrieved files to a directory.
+
+        Args:
+            output_dir: Directory to save files to
+        """
+        if not self.files:
+            return
+
+        from pathlib import Path
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        for file_path, content in self.files.items():
+            # Remove leading slash for relative path
+            relative_path = file_path.lstrip("/")
+            full_path = output_path / relative_path
+
+            # Create parent directories if needed
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Write file
+            full_path.write_bytes(content)
 
 
 # Package configuration
@@ -115,6 +154,9 @@ class BasePyodideSandbox:
         skip_deno_check: bool = False,
         files: dict[str, str | bytes] | None = None,
         directories: list[str] | None = None,
+        return_files: bool = False,
+        file_paths: list[str] | None = None,
+        max_file_size: int | None = None,
     ) -> None:
         """Initialize the sandbox with specific Deno permissions.
 
@@ -175,8 +217,14 @@ class BasePyodideSandbox:
             files: Dictionary of files to attach to the sandbox filesystem.
                 Keys are file paths, values are file contents (str or bytes).
             directories: List of directory paths to create in the sandbox filesystem.
+            return_files: If True, collect and return files generated during execution.
+            file_paths: List of paths to collect files from (default: ["/sandbox", "/tmp"]).
+            max_file_size: Maximum file size in bytes to return (default: 10MB).
         """
         self.stateful = stateful
+        self.return_files = return_files
+        self.file_paths = file_paths or ["/sandbox", "/tmp"]
+        self.max_file_size = max_file_size or 10 * 1024 * 1024  # 10MB default
         # List to store file information for binary streaming
         self._sandbox_files = []
         # List to store directory paths
@@ -395,6 +443,16 @@ class BasePyodideSandbox:
         if session_metadata:
             cmd.extend(["-m", json.dumps(session_metadata)])
 
+        # Add file collection options
+        if self.return_files:
+            cmd.extend(["-r"])
+
+        if self.file_paths and self.file_paths != ["/sandbox", "/tmp"]:
+            cmd.extend(["-p", ",".join(self.file_paths)])
+
+        if self.max_file_size and self.max_file_size != 10 * 1024 * 1024:
+            cmd.extend(["--max-file-size", str(self.max_file_size)])
+
         return cmd
 
 
@@ -402,13 +460,21 @@ def _process_execution_output(
     stdout_text: str,
     stderr_bytes: bytes,
 ) -> tuple[
-    str, str, Any, str, dict | None, dict | None, list[dict] | None, bytes | None
+    str,
+    str,
+    Any,
+    str,
+    dict | None,
+    dict | None,
+    list[dict] | None,
+    bytes | None,
+    dict[str, bytes] | None,
 ]:
     """Process execution output and return parsed results.
 
     Returns:
         Tuple of (stdout, stderr, result, status, session_metadata,
-                 filesystem_info, filesystem_operations, session_bytes)
+                 filesystem_info, filesystem_operations, session_bytes, files)
     """
     if stdout_text:
         try:
@@ -425,6 +491,17 @@ def _process_execution_output(
             session_bytes_array = full_result.get("sessionBytes", None)
             session_bytes = bytes(session_bytes_array) if session_bytes_array else None
 
+            # Process collected files
+            files_data = full_result.get("files", None)
+            files = None
+            if files_data:
+                files = {}
+                for file_info in files_data:
+                    if file_info.get("content"):
+                        # Convert array of integers back to bytes
+                        content_bytes = bytes(file_info["content"])
+                        files[file_info["path"]] = content_bytes
+
             return (
                 stdout,
                 stderr,
@@ -434,14 +511,15 @@ def _process_execution_output(
                 filesystem_info,
                 filesystem_operations,
                 session_bytes,
+                files,
             )
         except json.JSONDecodeError as e:
             status = "error"
             stderr = f"Failed to parse output as JSON: {e}\nRaw output: {stdout_text}"
-            return ("", stderr, None, status, None, None, None, None)
+            return ("", stderr, None, status, None, None, None, None, None)
 
     stderr = stderr_bytes.decode("utf-8", errors="replace")
-    return ("", stderr, None, "error", None, None, None, None)
+    return ("", stderr, None, "error", None, None, None, None, None)
 
 
 class PyodideSandbox(BasePyodideSandbox):
@@ -522,6 +600,7 @@ class PyodideSandbox(BasePyodideSandbox):
                 filesystem_info,
                 filesystem_operations,
                 session_bytes,
+                files,
             ) = _process_execution_output(stdout_text, stderr_bytes)
 
         except asyncio.TimeoutError:
@@ -536,6 +615,7 @@ class PyodideSandbox(BasePyodideSandbox):
             filesystem_info = None
             filesystem_operations = None
             session_bytes = None
+            files = None
         except (OSError, subprocess.SubprocessError) as e:
             status = "error"
             stderr = f"Error during execution: {e!s}"
@@ -545,6 +625,7 @@ class PyodideSandbox(BasePyodideSandbox):
             filesystem_info = None
             filesystem_operations = None
             session_bytes = None
+            files = None
 
         end_time = time.time()
 
@@ -558,6 +639,7 @@ class PyodideSandbox(BasePyodideSandbox):
             session_bytes=session_bytes,
             filesystem_info=filesystem_info,
             filesystem_operations=filesystem_operations,
+            files=files,
         )
 
 
@@ -630,6 +712,7 @@ class SyncPyodideSandbox(BasePyodideSandbox):
                 filesystem_info,
                 filesystem_operations,
                 session_bytes,
+                files,
             ) = _process_execution_output(stdout_text, process.stderr)
 
         except subprocess.TimeoutExpired:
@@ -640,6 +723,7 @@ class SyncPyodideSandbox(BasePyodideSandbox):
             filesystem_info = None
             filesystem_operations = None
             session_bytes = None
+            files = None
         except (OSError, subprocess.SubprocessError) as e:
             status = "error"
             stderr = f"Error during execution: {e!s}"
@@ -648,6 +732,7 @@ class SyncPyodideSandbox(BasePyodideSandbox):
             filesystem_info = None
             filesystem_operations = None
             session_bytes = None
+            files = None
 
         end_time = time.time()
 
@@ -661,6 +746,7 @@ class SyncPyodideSandbox(BasePyodideSandbox):
             session_bytes=session_bytes,
             filesystem_info=filesystem_info,
             filesystem_operations=filesystem_operations,
+            files=files,
         )
 
 

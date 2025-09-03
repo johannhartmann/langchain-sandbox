@@ -306,6 +306,7 @@ interface PyodideResult {
     workingDirectory: string;
     mounted: boolean;
   };
+  files?: any[];
 }
 
 interface FileSystemOperation {
@@ -370,6 +371,122 @@ def resolve_path(path):
 
 sys.modules['__main__'].resolve_path = resolve_path
   `);
+}
+
+/**
+ * Collect all files from specified directories in the Pyodide filesystem.
+ * Returns an array of file objects with path, size, and content.
+ */
+function collectAllFiles(
+  pyodide: any,
+  paths: string[] = ["/sandbox", "/tmp"],
+  options: { maxFileSize?: number; returnFiles?: boolean } = {}
+): any[] {
+  if (!options.returnFiles) {
+    return [];
+  }
+
+  const files: any[] = [];
+  const maxSize = options.maxFileSize || 10 * 1024 * 1024; // Default 10MB max per file
+  
+  function walkDirectory(dir: string): void {
+    try {
+      const items = pyodide.FS.readdir(dir);
+      
+      for (const item of items) {
+        if (item === "." || item === "..") continue;
+        
+        const fullPath = dir.endsWith("/") ? `${dir}${item}` : `${dir}/${item}`;
+        
+        try {
+          const stat = pyodide.FS.stat(fullPath);
+          
+          if (pyodide.FS.isDir(stat.mode)) {
+            // Recursively walk subdirectories
+            walkDirectory(fullPath);
+          } else if (pyodide.FS.isFile(stat.mode)) {
+            // Skip files that are too large
+            if (stat.size > maxSize) {
+              files.push({
+                path: fullPath,
+                size: stat.size,
+                content: null,
+                error: `File too large (${stat.size} bytes > ${maxSize} bytes)`,
+                encoding: "binary"
+              });
+              continue;
+            }
+            
+            // Read file content
+            try {
+              const content = pyodide.FS.readFile(fullPath);
+              
+              // Try to determine if it's text or binary
+              let isText = true;
+              let textContent = null;
+              
+              try {
+                // Try to decode as UTF-8
+                const decoder = new TextDecoder("utf-8", { fatal: true });
+                textContent = decoder.decode(content);
+              } catch {
+                isText = false;
+              }
+              
+              files.push({
+                path: fullPath,
+                size: stat.size,
+                content: Array.from(content), // Convert Uint8Array to regular array for JSON serialization
+                encoding: isText ? "utf-8" : "binary",
+                isText: isText
+              });
+            } catch (readError: any) {
+              files.push({
+                path: fullPath,
+                size: stat.size,
+                content: null,
+                error: `Failed to read file: ${readError.message}`,
+                encoding: "binary"
+              });
+            }
+          }
+        } catch (statError: any) {
+          // Skip files we can't stat
+          console.error(`Failed to stat ${fullPath}: ${statError.message}`);
+        }
+      }
+    } catch (readdirError: any) {
+      // Skip directories we can't read
+      console.error(`Failed to read directory ${dir}: ${readdirError.message}`);
+    }
+  }
+  
+  // Walk each specified path
+  for (const path of paths) {
+    if (pyodide.FS.analyzePath(path).exists) {
+      if (pyodide.FS.isDir(pyodide.FS.stat(path).mode)) {
+        walkDirectory(path);
+      } else {
+        // Single file specified
+        try {
+          const stat = pyodide.FS.stat(path);
+          if (stat.size <= maxSize) {
+            const content = pyodide.FS.readFile(path);
+            files.push({
+              path: path,
+              size: stat.size,
+              content: Array.from(content),
+              encoding: "binary"
+            });
+          }
+        } catch (error: any) {
+          console.error(`Failed to read file ${path}: ${error.message}`);
+        }
+      }
+    }
+  }
+  
+  return files;
 }
 
 function initPyodide(pyodide: unknown): void {
@@ -519,6 +636,9 @@ async function runPython(
     stateful?: boolean;
     sessionBytes?: string;
     sessionMetadata?: string;
+    returnFiles?: boolean;
+    filePaths?: string[];
+    maxFileSize?: number;
   } = {}
 ): Promise<PyodideResult> {
   const output: string[] = [];
@@ -663,6 +783,19 @@ async function runPython(
       mounted: true
     };
 
+    // Collect files if requested
+    if (options.returnFiles) {
+      const collectedFiles = collectAllFiles(
+        pyodide,
+        options.filePaths || ["/sandbox", "/tmp"],
+        {
+          returnFiles: true,
+          maxFileSize: options.maxFileSize
+        }
+      );
+      result["files"] = collectedFiles;
+    }
+
     return result;
   } catch (error: unknown) {
     return { 
@@ -676,7 +809,7 @@ async function runPython(
 
 async function main(): Promise<void> {
   const flags = parseArgs(Deno.args, {
-    string: ["code", "file", "session-bytes", "session-metadata"],
+    string: ["code", "file", "session-bytes", "session-metadata", "file-paths", "max-file-size"],
     alias: {
       c: "code",
       f: "file",
@@ -685,12 +818,15 @@ async function main(): Promise<void> {
       s: "stateful",
       b: "session-bytes",
       m: "session-metadata",
+      r: "return-files",
+      p: "file-paths",
     },
-    boolean: ["help", "version", "stateful"],
+    boolean: ["help", "version", "stateful", "return-files"],
     default: { 
       help: false, 
       version: false, 
-      stateful: false
+      stateful: false,
+      "return-files": false
     },
   });
 
@@ -705,6 +841,9 @@ OPTIONS:
   -s, --stateful <bool>          Use a stateful session
   -b, --session-bytes <bytes>    Session bytes
   -m, --session-metadata         Session metadata
+  -r, --return-files             Return generated files in output
+  -p, --file-paths <paths>       Comma-separated paths to collect files from
+  --max-file-size <bytes>        Maximum file size to return (default: 10MB)
   -h, --help                     Display help
   -V, --version                  Display version
 `);     
@@ -748,6 +887,9 @@ OPTIONS:
     stateful: flags.stateful,
     sessionBytes: flags["session-bytes"],
     sessionMetadata: flags["session-metadata"],
+    returnFiles: flags["return-files"],
+    filePaths: flags["file-paths"]?.split(","),
+    maxFileSize: flags["max-file-size"] ? parseInt(flags["max-file-size"]) : undefined,
   });
 
   // Create output JSON with stdout, stderr, and result
@@ -766,6 +908,11 @@ OPTIONS:
   }
   if (result.fileSystemOperations) {
     outputJson.fileSystemOperations = result.fileSystemOperations;
+  }
+  
+  // Include collected files if requested
+  if (result.files) {
+    outputJson.files = result.files;
   }
 
   // Output as JSON to stdout
