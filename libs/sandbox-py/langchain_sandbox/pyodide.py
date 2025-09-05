@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -78,17 +79,208 @@ class CodeExecutionResult:
             full_path.write_bytes(content)
 
 
-# Package configuration
-# Use the source TypeScript file directly from the original location
-# This ensures we have access to the proper Deno configuration and dependencies
-SANDBOX_JS_PATH = Path(__file__).parent.parent.parent / "pyodide-sandbox-js" / "main.ts"
+# Package configuration - use TypeScript file included in package
+def fetch_typescript_from_github() -> str:
+    """Fetch TypeScript file from GitHub with intelligent caching.
 
-# Ensure the path exists and use absolute path
-if SANDBOX_JS_PATH.exists():
-    PKG_NAME = str(SANDBOX_JS_PATH.absolute())
-else:
-    # Fallback to JSR package if local source not found
-    PKG_NAME = "jsr:@langchain/pyodide-sandbox@0.0.4"
+    Downloads the main.ts file from the langchain-sandbox GitHub repository
+    and caches it locally. Uses cache if available and fresh, with fallback
+    to stale cache if network fails.
+
+    Returns:
+        Path to the cached TypeScript file
+
+    Raises:
+        RuntimeError: If unable to fetch or find the TypeScript file
+    """
+    import hashlib
+    import json
+    from datetime import datetime, timedelta
+    from urllib.error import URLError
+    from urllib.request import urlopen
+
+    # Configuration
+    github_url = "https://raw.githubusercontent.com/johannhartmann/langchain-sandbox/main/libs/pyodide-sandbox-js/main.ts"
+    cache_dir = Path.home() / ".cache" / "langchain_sandbox"
+    cache_file = cache_dir / "pyodide_sandbox.ts"
+    metadata_file = cache_dir / "metadata.json"
+    cache_ttl_hours = 24  # Cache validity period
+
+    # Allow override via environment variable
+    custom_cache = os.environ.get("LANGCHAIN_SANDBOX_CACHE_DIR")
+    if custom_cache:
+        cache_dir = Path(custom_cache)
+        cache_file = cache_dir / "pyodide_sandbox.ts"
+        metadata_file = cache_dir / "metadata.json"
+
+    # Ensure cache directory exists
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def compute_hash(content: bytes) -> str:
+        """Compute SHA256 hash of content."""
+        return hashlib.sha256(content).hexdigest()
+
+    def is_cache_valid() -> bool:
+        """Check if cache exists and is fresh."""
+        if not cache_file.exists() or not metadata_file.exists():
+            return False
+
+        try:
+            with open(metadata_file) as f:
+                metadata = json.load(f)
+
+            cached_time = datetime.fromisoformat(metadata.get("timestamp", ""))
+            ttl_delta = timedelta(hours=cache_ttl_hours)
+
+            # Check if cache is within TTL
+            if datetime.now() - cached_time <= ttl_delta:
+                logger.debug(f"Cache is fresh (age: {datetime.now() - cached_time})")
+                return True
+            logger.debug(f"Cache expired (age: {datetime.now() - cached_time})")
+            return False
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.debug(f"Invalid cache metadata: {e}")
+            return False
+
+    def save_to_cache(content: bytes) -> None:
+        """Save content to cache with metadata."""
+        # Write TypeScript file
+        cache_file.write_bytes(content)
+
+        # Write metadata
+        metadata = {
+            "timestamp": datetime.now().isoformat(),
+            "hash": compute_hash(content),
+            "url": github_url,
+            "size": len(content),
+        }
+        with open(metadata_file, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        logger.debug(f"Cached TypeScript file ({len(content)} bytes) to {cache_file}")
+
+    # Try to use valid cache first
+    if is_cache_valid():
+        logger.debug(f"Using cached TypeScript file from {cache_file}")
+        return str(cache_file.absolute())
+
+    # Try to fetch from GitHub
+    try:
+        logger.info("Fetching TypeScript file from GitHub...")
+        with urlopen(github_url, timeout=10) as response:
+            content = response.read()
+
+        # Validate content (should be TypeScript/JavaScript)
+        if not content or len(content) < 100:
+            msg = f"Invalid content from GitHub (size: {len(content)})"
+            raise ValueError(msg)
+
+        # Save to cache
+        save_to_cache(content)
+        logger.info(
+            f"Successfully fetched and cached TypeScript file ({len(content)} bytes)"
+        )
+        return str(cache_file.absolute())
+
+    except (URLError, OSError, ValueError) as e:
+        logger.warning(f"Failed to fetch from GitHub: {e}")
+
+        # Fallback to stale cache if available
+        if cache_file.exists():
+            logger.warning("Using stale cache as fallback")
+            return str(cache_file.absolute())
+
+        # No cache available
+        msg = (
+            f"Unable to fetch TypeScript file from GitHub and no cache available.\n"
+            f"Error: {e}\n"
+            f"URL: {github_url}\n"
+            f"Cache location: {cache_file}\n"
+            "Please check your internet connection or set LANGCHAIN_SANDBOX_TS_PATH."
+        )
+        raise RuntimeError(
+            msg
+        )
+
+
+def get_typescript_path() -> str:
+    """Get the path to the TypeScript sandbox implementation.
+
+    Tries multiple locations in order of preference:
+    1. Environment variable override (HIGHEST PRIORITY for Docker)
+    2. Local package file (installed via pip)
+    3. Development mode - relative path to source
+    4. GitHub URL with caching (only if not in Docker)
+
+    Raises:
+        RuntimeError: If no TypeScript file can be found
+    """
+    # 1. Check environment variable FIRST (for Docker deployments)
+    env_path = os.environ.get("LANGCHAIN_SANDBOX_TS_PATH")
+    if env_path:
+        env_ts = Path(env_path)
+        if env_ts.exists():
+            logger.info(f"Using TypeScript from environment variable: {env_path}")
+            return str(env_ts.absolute())
+        # If env var is set but file doesn't exist, this is a critical error
+        # Don't fall back to other methods - fail immediately
+        msg = (
+            f"LANGCHAIN_SANDBOX_TS_PATH is set to '{env_path}' but file does not exist. "
+            "This is a configuration error. The TypeScript file should be baked into the Docker image."
+        )
+        raise RuntimeError(
+            msg
+        )
+
+    # 2. Check for local package file (installed via pip)
+    local_ts = Path(__file__).parent / "pyodide_sandbox.ts"
+    if local_ts.exists():
+        logger.debug(f"Using local package TypeScript: {local_ts}")
+        return str(local_ts.absolute())
+
+    # 3. Development mode - check relative path
+    dev_ts = Path(__file__).parent.parent.parent / "pyodide-sandbox-js" / "main.ts"
+    if dev_ts.exists():
+        logger.debug(f"Using development TypeScript: {dev_ts}")
+        return str(dev_ts.absolute())
+
+    # 4. Detect if we're in Docker - if so, don't try GitHub fetch
+    is_docker = os.environ.get("DOCKER_ENV") == "1"
+    if is_docker:
+        msg = (
+            "Cannot find pyodide-sandbox TypeScript file in Docker environment.\n"
+            f"  1. LANGCHAIN_SANDBOX_TS_PATH environment variable - not set\n"
+            f"  2. {local_ts} (package installation) - not found\n"
+            f"  3. {dev_ts} (development mode) - not found\n"
+            "In Docker, the TypeScript file should be baked into the image and "
+            "LANGCHAIN_SANDBOX_TS_PATH should be set."
+        )
+        raise RuntimeError(
+            msg
+        )
+
+    # 5. Try to fetch from GitHub with caching (only outside Docker)
+    try:
+        github_path = fetch_typescript_from_github()
+        logger.debug(f"Using GitHub-fetched TypeScript: {github_path}")
+        return github_path
+    except RuntimeError as e:
+        # Include GitHub fetch error in final error message
+        msg = (
+            "Cannot find pyodide-sandbox TypeScript file. Tried:\n"
+            f"  1. LANGCHAIN_SANDBOX_TS_PATH environment variable - not set\n"
+            f"  2. {local_ts} (package installation) - not found\n"
+            f"  3. {dev_ts} (development mode) - not found\n"
+            f"  4. GitHub fetch failed: {e}\n"
+            "Please ensure the package is properly installed, set the environment variable, "
+            "or check your internet connection."
+        )
+        raise RuntimeError(
+            msg
+        )
+
+
+PKG_NAME = get_typescript_path()
 
 
 def build_permission_flag(
@@ -248,15 +440,17 @@ class BasePyodideSandbox:
         read_defaults = ["node_modules"]
         write_defaults = ["node_modules"]
 
-        if SANDBOX_JS_PATH.exists() and SANDBOX_JS_PATH.is_file():
+        # PKG_NAME contains the path to the TypeScript file
+        sandbox_js_path = Path(PKG_NAME)
+        if sandbox_js_path.exists() and sandbox_js_path.is_file():
             # Add the parent directory of the TypeScript file to permissions
-            js_parent_dir = str(SANDBOX_JS_PATH.parent.absolute())
+            js_parent_dir = str(sandbox_js_path.parent.absolute())
             read_defaults.append(js_parent_dir)
             write_defaults.append(js_parent_dir)
 
             # If allow_read is a list, add the JS directory to it
             if isinstance(allow_read, list):
-                allow_read = allow_read + [js_parent_dir]
+                allow_read = [*allow_read, js_parent_dir]
             elif allow_read is True:
                 # Keep it as True (allows all)
                 pass
@@ -266,7 +460,7 @@ class BasePyodideSandbox:
 
             # Same for write permissions
             if isinstance(allow_write, list):
-                allow_write = allow_write + [js_parent_dir]
+                allow_write = [*allow_write, js_parent_dir]
             elif allow_write is True:
                 # Keep it as True (allows all)
                 pass

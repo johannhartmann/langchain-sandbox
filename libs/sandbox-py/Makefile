@@ -44,6 +44,22 @@ unsafe_format:
 	
 
 ######################
+# BUILD AND PACKAGE
+######################
+
+copy-typescript:
+	python scripts/copy_typescript.py
+
+build: copy-typescript
+	python -m build
+
+publish: build
+	python -m twine upload dist/*
+
+clean:
+	rm -rf dist/ build/ *.egg-info
+
+######################
 # HELP
 ######################
 
@@ -58,5 +74,10 @@ help:
 	@echo 'coverage                     - run unit tests and generate coverage report'
 	@echo 'test                         - run unit tests'
 	@echo 'test TEST_FILE=<test_file>   - run all tests in file'
+	@echo '-- BUILD AND PACKAGE --'
+	@echo 'copy-typescript              - copy TypeScript file to package directory'
+	@echo 'build                        - build the package (includes copy-typescript)'
+	@echo 'publish                      - build and publish to PyPI'
+	@echo 'clean                        - remove build artifacts'
 	@echo '-- DOCUMENTATION tasks are from the top-level Makefile --'
 
